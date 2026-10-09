@@ -1,0 +1,10 @@
+build/
+gen/
+__pycache__/
+*.pyc
+~$*.xlsx
+json/
+*.3dsx
+*.elf
+*.smdh
+platform/hello/build/
