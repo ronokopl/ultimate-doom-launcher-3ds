@@ -372,6 +372,8 @@ struct DecoderAccess : SoundRenderer
 };
 
 // Same transform as NDSPSoundRenderer::MakeSample: 16-bit mono, rate halved (pair average) when >= 32 kHz.
+// Decodes in small pieces: SoundDecoder::readAll doubles one buffer, which for a long stereo sound needs a 12 MB block
+// (and the old one alongside it), more than the heap has left after the mod is loaded.
 static bool MakeWav(const unsigned char *data, int length, std::vector<unsigned char> &wav)
 {
 	if (GSnd == NULL)
@@ -382,30 +384,49 @@ static bool MakeWav(const unsigned char *data, int length, std::vector<unsigned 
 		return false;
 	int rate; ChannelConfig chans; SampleType type;
 	decoder->getInfo(&rate, &chans, &type);
-	TArray<char> raw = decoder->readAll();
-	delete decoder;
 	int channels = chans == ChannelConfig_Stereo ? 2 : 1, bits = type == SampleType_UInt8 ? 8 : 16, bytesper = bits / 8;
-	if (rate <= 0 || raw.Size() < (unsigned)(bytesper * channels))
-		return false;
-	unsigned frames = raw.Size() / (bytesper * channels);
 	int step = rate >= 32000 ? 2 : 1;
-	unsigned outframes = frames / step;
+	unsigned group = step * channels * bytesper;	// input bytes per output sample
+	if (rate <= 0)
+	{
+		delete decoder;
+		return false;
+	}
+	wav.assign(44, 0);
+	size_t frames = decoder->getSampleLength();
+	if (frames > 0)
+		wav.reserve(44 + frames / step * 2);
+	std::vector<unsigned char> buf(32768 + group);
+	unsigned have = 0;
+	for (;;)
+	{
+		unsigned got = (unsigned)decoder->read((char *)&buf[have], buf.size() - have);
+		have += got;
+		unsigned groups = have / group;
+		size_t at = wav.size();
+		wav.resize(at + groups * 2);
+		for (unsigned g = 0; g < groups; ++g)
+		{
+			const BYTE *p0 = &buf[g * group];
+			int acc = 0;
+			for (int k = 0; k < step; ++k)
+			{
+				const BYTE *p = p0 + k * channels * bytesper;
+				for (int c = 0; c < channels; ++c)
+					acc += bits == 8 ? ((int)p[c] - 128) << 8 : (int)(SWORD)(p[c * 2] | (p[c * 2 + 1] << 8));
+			}
+			short s = (short)(acc / (step * channels));
+			memcpy(&wav[at + g * 2], &s, 2);
+		}
+		memmove(&buf[0], &buf[groups * group], have - groups * group);
+		have -= groups * group;
+		if (got == 0)
+			break;
+	}
+	delete decoder;
+	unsigned outframes = (wav.size() - 44) / 2;
 	if (outframes == 0)
 		return false;
-	const BYTE *src = (const BYTE *)&raw[0];
-	wav.resize(44 + outframes * 2);
-	for (unsigned f = 0; f < outframes; ++f)
-	{
-		int acc = 0;
-		for (int k = 0; k < step; ++k)
-		{
-			const BYTE *p = src + ((f * step + k) * channels) * bytesper;
-			for (int c = 0; c < channels; ++c)
-				acc += bits == 8 ? ((int)p[c] - 128) << 8 : (int)(SWORD)(p[c * 2] | (p[c * 2 + 1] << 8));
-		}
-		short s = (short)(acc / (step * channels));
-		memcpy(&wav[44 + f * 2], &s, 2);
-	}
 	unsigned outrate = rate / step, datasize = outframes * 2, riff = 36 + datasize, byterate = outrate * 2;
 	unsigned char *h = &wav[0];
 	memcpy(h, "RIFF", 4); memcpy(h + 4, &riff, 4); memcpy(h + 8, "WAVEfmt ", 8);

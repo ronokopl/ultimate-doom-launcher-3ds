@@ -346,10 +346,23 @@ public:
 			return retval;
 		int rate; ChannelConfig chans; SampleType type;
 		decoder->getInfo(&rate, &chans, &type);
-		TArray<char> data = decoder->readAll();
-		delete decoder;
 		int channels = chans == ChannelConfig_Stereo ? 2 : 1;
 		int bits = type == SampleType_UInt8 ? 8 : 16;
+		// A known length is read into one exact buffer: readAll doubles its buffer, which for a long stereo sound
+		// needs a 12 MB block next to the old one.
+		TArray<char> data;
+		size_t frames = decoder->getSampleLength();
+		if (frames > 0)
+		{
+			data.Resize((unsigned)(frames * channels * (bits / 8)));
+			size_t got = 0, n;
+			while (got < data.Size() && (n = decoder->read(&data[got], data.Size() - got)) > 0)
+				got += n;
+			data.Resize((unsigned)got);
+		}
+		else
+			data = decoder->readAll();
+		delete decoder;
 		return MakeSample(data.Size() ? (const BYTE *)&data[0] : NULL, data.Size(), rate, channels, bits);
 	}
 
